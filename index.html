@@ -1,0 +1,476 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>2025-2026 Moxie Bowl Pick'em</title>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect } = React;
+
+    // Simple localStorage-based storage that mimics window.storage API
+    const storage = {
+      get: async (key) => {
+        const value = localStorage.getItem(key);
+        return value ? { key, value, shared: false } : null;
+      },
+      set: async (key, value) => {
+        localStorage.setItem(key, value);
+        return { key, value, shared: false };
+      },
+      delete: async (key) => {
+        localStorage.removeItem(key);
+        return { key, deleted: true, shared: false };
+      },
+      list: async (prefix) => {
+        const keys = Object.keys(localStorage).filter(k => k.startsWith(prefix));
+        return { keys, prefix, shared: false };
+      }
+    };
+
+    const App = () => {
+      const [playerName, setPlayerName] = useState('');
+      const [isLoggedIn, setIsLoggedIn] = useState(false);
+      const [picks, setPicks] = useState({});
+      const [games, setGames] = useState([]);
+      const [scores, setScores] = useState({});
+      const [leaderboard, setLeaderboard] = useState([]);
+      const [loading, setLoading] = useState(false);
+      const [activeTab, setActiveTab] = useState('picks');
+      const [shareLink, setShareLink] = useState('');
+
+      const calculateSpreadBonus = (predictedSpread, actualSpread) => {
+        const diff = Math.abs(predictedSpread - actualSpread);
+        if (diff <= 1) return 10;
+        if (diff <= 3) return 9;
+        if (diff <= 5) return 8;
+        if (diff <= 7) return 7;
+        if (diff <= 9) return 6;
+        if (diff <= 11) return 5;
+        if (diff <= 13) return 4;
+        if (diff <= 15) return 3;
+        if (diff <= 17) return 2;
+        if (diff <= 19) return 1;
+        return 0;
+      };
+
+      const calculatePoints = (pick, score) => {
+        if (!pick || !score || !score.final) return 0;
+        let points = 0;
+        if (pick.team === score.winner) {
+          points = 10;
+          if (pick.spread !== undefined && score.actualSpread !== undefined) {
+            points += calculateSpreadBonus(pick.spread, score.actualSpread);
+          }
+        }
+        return points;
+      };
+
+      const sampleGames = [
+        { id: 1, bowl: 'Rose Bowl', team1: 'Ohio State', team2: 'Oregon', date: '2025-01-01' },
+        { id: 2, bowl: 'Sugar Bowl', team1: 'Georgia', team2: 'Texas', date: '2025-01-01' },
+        { id: 3, bowl: 'Orange Bowl', team1: 'Florida State', team2: 'Alabama', date: '2025-01-02' },
+        { id: 4, bowl: 'Cotton Bowl', team1: 'Penn State', team2: 'Ole Miss', date: '2025-01-02' },
+      ];
+
+      useEffect(() => {
+        loadGames();
+        loadPlayerData();
+        loadLeaderboard();
+        setShareLink(window.location.href);
+      }, []);
+
+      const loadGames = async () => {
+        try {
+          const result = await storage.get('bowl-games');
+          if (result) {
+            setGames(JSON.parse(result.value));
+          } else {
+            setGames(sampleGames);
+            await storage.set('bowl-games', JSON.stringify(sampleGames));
+          }
+        } catch (error) {
+          setGames(sampleGames);
+          await storage.set('bowl-games', JSON.stringify(sampleGames));
+        }
+      };
+
+      const loadPlayerData = async () => {
+        const savedPlayer = localStorage.getItem('currentPlayer');
+        if (savedPlayer) {
+          setPlayerName(savedPlayer);
+          setIsLoggedIn(true);
+          await loadPicks(savedPlayer);
+        }
+      };
+
+      const loadPicks = async (player) => {
+        try {
+          const result = await storage.get(`picks:${player}`);
+          if (result) {
+            setPicks(JSON.parse(result.value));
+          }
+        } catch (error) {
+          console.log('No existing picks found');
+        }
+      };
+
+      const loadLeaderboard = async () => {
+        try {
+          const result = await storage.list('picks:');
+          if (result && result.keys) {
+            const standings = await Promise.all(
+              result.keys.map(async (key) => {
+                const player = key.replace('picks:', '');
+                const picksResult = await storage.get(key);
+                const playerPicks = JSON.parse(picksResult.value);
+                
+                let totalPoints = 0;
+                let gamesScored = 0;
+                
+                Object.entries(playerPicks).forEach(([gameId, pick]) => {
+                  if (scores[gameId]) {
+                    const points = calculatePoints(pick, scores[gameId]);
+                    totalPoints += points;
+                    if (scores[gameId].final) gamesScored++;
+                  }
+                });
+                
+                return { 
+                  player, 
+                  points: totalPoints, 
+                  gamesScored,
+                  total: Object.keys(playerPicks).length 
+                };
+              })
+            );
+            
+            standings.sort((a, b) => b.points - a.points);
+            setLeaderboard(standings);
+          }
+        } catch (error) {
+          console.log('Error loading leaderboard');
+        }
+      };
+
+      const handleLogin = () => {
+        if (playerName.trim()) {
+          localStorage.setItem('currentPlayer', playerName);
+          setIsLoggedIn(true);
+          loadPicks(playerName);
+        }
+      };
+
+      const handleLogout = () => {
+        localStorage.removeItem('currentPlayer');
+        setPlayerName('');
+        setIsLoggedIn(false);
+        setPicks({});
+      };
+
+      const handlePick = async (gameId, team, spread) => {
+        const newPicks = { ...picks, [gameId]: { team, spread } };
+        setPicks(newPicks);
+        
+        try {
+          await storage.set(`picks:${playerName}`, JSON.stringify(newPicks));
+          alert('Pick saved!');
+        } catch (error) {
+          alert('Error saving pick');
+        }
+      };
+
+      const fetchScores = async () => {
+        setLoading(true);
+        alert("Score fetching requires backend integration. For now, use the admin panel to manually update scores.");
+        setLoading(false);
+      };
+
+      const copyShareLink = () => {
+        navigator.clipboard.writeText(shareLink);
+        alert('Link copied! Share this with your friends.');
+      };
+
+      if (!isLoggedIn) {
+        return (
+          <div className="min-h-screen bg-gradient-to-br from-blue-900 via-purple-900 to-indigo-900 flex items-center justify-center p-4">
+            <div className="bg-white rounded-2xl shadow-2xl p-8 max-w-md w-full">
+              <div className="text-center mb-8">
+                <div className="text-6xl mb-4">🏈</div>
+                <h1 className="text-3xl font-bold text-gray-800 mb-2">2025-2026 Moxie</h1>
+                <p className="text-xl text-purple-600 font-semibold mb-2">Bowl Pick'em</p>
+                <p className="text-gray-600">Enter your name to make your picks</p>
+              </div>
+              
+              <input
+                type="text"
+                value={playerName}
+                onChange={(e) => setPlayerName(e.target.value)}
+                onKeyPress={(e) => e.key === 'Enter' && handleLogin()}
+                placeholder="Your Name"
+                className="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:border-blue-500 focus:outline-none mb-4"
+              />
+              
+              <button
+                onClick={handleLogin}
+                className="w-full bg-blue-600 text-white py-3 rounded-lg font-semibold hover:bg-blue-700 transition"
+              >
+                Start Picking
+              </button>
+
+              <div className="mt-6 pt-6 border-t border-gray-200">
+                <p className="text-sm text-gray-600 text-center mb-2">Share with friends:</p>
+                <button
+                  onClick={copyShareLink}
+                  className="w-full bg-gray-100 text-gray-700 py-2 rounded-lg text-sm hover:bg-gray-200 transition"
+                >
+                  📋 Copy Link
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      }
+
+      return (
+        <div className="min-h-screen bg-gray-50">
+          <div className="bg-gradient-to-r from-blue-600 to-purple-600 text-white shadow-lg">
+            <div className="max-w-6xl mx-auto px-4 py-6">
+              <div className="flex justify-between items-center">
+                <div className="flex items-center gap-3">
+                  <div className="text-3xl">🏈</div>
+                  <div>
+                    <h1 className="text-2xl font-bold">2025-2026 Moxie Bowl Pick'em</h1>
+                    <p className="text-blue-100">Welcome, {playerName}</p>
+                  </div>
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    onClick={copyShareLink}
+                    className="px-4 py-2 bg-white/20 rounded-lg hover:bg-white/30 transition"
+                  >
+                    📤 Share
+                  </button>
+                  <button
+                    onClick={handleLogout}
+                    className="px-4 py-2 bg-white/20 rounded-lg hover:bg-white/30 transition"
+                  >
+                    Logout
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="max-w-6xl mx-auto px-4 py-4">
+            <div className="flex gap-2 bg-white rounded-lg p-1 shadow">
+              <button
+                onClick={() => setActiveTab('picks')}
+                className={`flex-1 py-2 px-4 rounded-md font-medium transition ${
+                  activeTab === 'picks' ? 'bg-blue-600 text-white' : 'text-gray-600 hover:bg-gray-100'
+                }`}
+              >
+                📅 Make Picks
+              </button>
+              <button
+                onClick={() => setActiveTab('leaderboard')}
+                className={`flex-1 py-2 px-4 rounded-md font-medium transition ${
+                  activeTab === 'leaderboard' ? 'bg-blue-600 text-white' : 'text-gray-600 hover:bg-gray-100'
+                }`}
+              >
+                👥 Leaderboard
+              </button>
+            </div>
+          </div>
+
+          <div className="max-w-6xl mx-auto px-4 pb-8">
+            {activeTab === 'picks' && (
+              <div>
+                <div className="bg-white rounded-lg shadow-lg p-6 mb-4">
+                  <div className="flex justify-between items-center">
+                    <h2 className="text-xl font-bold text-gray-800">Your Picks</h2>
+                    <button
+                      onClick={fetchScores}
+                      disabled={loading}
+                      className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition disabled:bg-gray-400"
+                    >
+                      🔄 Update Scores
+                    </button>
+                  </div>
+                </div>
+
+                <div className="space-y-4">
+                  {games.map((game) => {
+                    const currentPick = picks[game.id];
+                    const currentScore = scores[game.id];
+                    const gamePoints = calculatePoints(currentPick, currentScore);
+                    
+                    return (
+                      <div key={game.id} className="bg-white rounded-lg shadow-lg overflow-hidden">
+                        <div className="bg-gradient-to-r from-blue-500 to-purple-500 text-white px-6 py-3">
+                          <div className="flex justify-between items-center">
+                            <h3 className="text-lg font-bold">{game.bowl}</h3>
+                            <span className="text-sm">{game.date}</span>
+                          </div>
+                        </div>
+                        
+                        <div className="p-6">
+                          <div className="grid grid-cols-2 gap-4 mb-4">
+                            <button
+                              onClick={() => {
+                                const spread = currentPick?.team === game.team1 ? currentPick.spread : undefined;
+                                const newSpread = prompt(`Predict the point spread for ${game.team1}:`, spread || '');
+                                if (newSpread !== null) {
+                                  handlePick(game.id, game.team1, parseInt(newSpread) || 0);
+                                }
+                              }}
+                              className={`p-6 rounded-lg border-2 transition ${
+                                currentPick?.team === game.team1
+                                  ? 'border-blue-600 bg-blue-50'
+                                  : 'border-gray-200 hover:border-blue-300'
+                              }`}
+                            >
+                              <div className="text-xl font-bold text-gray-800">{game.team1}</div>
+                              {currentScore && (
+                                <div className="text-3xl font-bold text-blue-600 mt-2">
+                                  {currentScore.team1Score}
+                                </div>
+                              )}
+                              {currentPick?.team === game.team1 && currentPick.spread !== undefined && (
+                                <div className="text-sm text-gray-600 mt-2">
+                                  Your spread: {currentPick.spread} pts
+                                </div>
+                              )}
+                            </button>
+                            
+                            <button
+                              onClick={() => {
+                                const spread = currentPick?.team === game.team2 ? currentPick.spread : undefined;
+                                const newSpread = prompt(`Predict the point spread for ${game.team2}:`, spread || '');
+                                if (newSpread !== null) {
+                                  handlePick(game.id, game.team2, parseInt(newSpread) || 0);
+                                }
+                              }}
+                              className={`p-6 rounded-lg border-2 transition ${
+                                currentPick?.team === game.team2
+                                  ? 'border-blue-600 bg-blue-50'
+                                  : 'border-gray-200 hover:border-blue-300'
+                              }`}
+                            >
+                              <div className="text-xl font-bold text-gray-800">{game.team2}</div>
+                              {currentScore && (
+                                <div className="text-3xl font-bold text-blue-600 mt-2">
+                                  {currentScore.team2Score}
+                                </div>
+                              )}
+                              {currentPick?.team === game.team2 && currentPick.spread !== undefined && (
+                                <div className="text-sm text-gray-600 mt-2">
+                                  Your spread: {currentPick.spread} pts
+                                </div>
+                              )}
+                            </button>
+                          </div>
+                          
+                          {currentScore && (
+                            <div className="mt-4 text-center space-y-2">
+                              <div>
+                                <span className={`inline-block px-4 py-2 rounded-full text-sm font-semibold ${
+                                  currentScore.final ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'
+                                }`}>
+                                  {currentScore.final ? '✓ Final' : 'In Progress'}
+                                </span>
+                                {currentScore.actualSpread !== undefined && (
+                                  <span className="ml-3 text-sm text-gray-600">
+                                    Actual spread: {currentScore.actualSpread} pts
+                                  </span>
+                                )}
+                              </div>
+                              {currentPick && currentScore.winner && currentScore.final && (
+                                <div className="flex justify-center items-center gap-3">
+                                  <span className={`inline-block px-4 py-2 rounded-full text-sm font-semibold ${
+                                    currentPick.team === currentScore.winner
+                                      ? 'bg-green-100 text-green-800'
+                                      : 'bg-red-100 text-red-800'
+                                  }`}>
+                                    {currentPick.team === currentScore.winner ? '✓ Winner Correct' : '✗ Winner Wrong'}
+                                  </span>
+                                  <span className="inline-block px-4 py-2 rounded-full text-lg font-bold bg-blue-100 text-blue-800">
+                                    {gamePoints} points
+                                  </span>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {activeTab === 'leaderboard' && (
+              <div className="bg-white rounded-lg shadow-lg overflow-hidden">
+                <div className="bg-gradient-to-r from-yellow-500 to-orange-500 text-white px-6 py-4">
+                  <h2 className="text-2xl font-bold flex items-center gap-2">
+                    🏆 Leaderboard
+                  </h2>
+                </div>
+                
+                <div className="p-6">
+                  {leaderboard.length === 0 ? (
+                    <p className="text-gray-500 text-center py-8">No picks submitted yet</p>
+                  ) : (
+                    <div className="space-y-3">
+                      {leaderboard.map((entry, index) => (
+                        <div
+                          key={entry.player}
+                          className={`flex items-center justify-between p-4 rounded-lg ${
+                            index === 0 ? 'bg-yellow-50 border-2 border-yellow-400' : 'bg-gray-50'
+                          }`}
+                        >
+                          <div className="flex items-center gap-4">
+                            <div className={`w-10 h-10 rounded-full flex items-center justify-center font-bold ${
+                              index === 0 ? 'bg-yellow-400 text-yellow-900' :
+                              index === 1 ? 'bg-gray-300 text-gray-700' :
+                              index === 2 ? 'bg-orange-300 text-orange-900' :
+                              'bg-gray-200 text-gray-600'
+                            }`}>
+                              {index + 1}
+                            </div>
+                            <div>
+                              <div className="font-bold text-gray-800">{entry.player}</div>
+                              <div className="text-sm text-gray-500">
+                                {entry.gamesScored} of {entry.total} games scored
+                              </div>
+                            </div>
+                          </div>
+                          <div className="text-right">
+                            <div className="text-3xl font-bold text-blue-600">
+                              {entry.points}
+                            </div>
+                            <div className="text-xs text-gray-500">points</div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    };
+
+    ReactDOM.render(<App />, document.getElementById('root'));
+  </script>
+</body>
+</html>
